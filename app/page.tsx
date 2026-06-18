@@ -78,76 +78,45 @@ export default function DashboardPage() {
     const filesArray = Array.from(event.target.files);
 
     setIsScanning(true);
-    setProgress(0);
+    setProgress(15); // สัญญาณบอกว่าระบบกำลังอัปโหลดรูปขึ้นเซิร์ฟเวอร์ให้
 
     try {
-      // บีบอัดรูปทั้งหมดพร้อมกัน
-      setProgress(10);
-      const compressedFiles = await Promise.all(
-        filesArray.map((file) => compressImage(file))
-      );
-
-      // ยัดทุกรูปลง FormData เดียว → ส่ง API ครั้งเดียว
       const formData = new FormData();
-      compressedFiles.forEach((file) => formData.append('images', file));
+      // โยนรูปภาพทั้งหมดใส่ตะกร้าเตรียมอัปโหลดในรอบเดียว
+      filesArray.forEach((file) => formData.append('images', file));
 
-      setProgress(30);
+      // 🚀 ยิงส่งตูมเดียวขึ้นคลาวด์ Vercel (ใช้เวลาส่งเน็ตแค่แป๊บเดียว)
       const response = await fetch('/api/process-billing', {
         method: 'POST',
         body: formData,
       });
 
-      if (response.status === 429) {
-        alert('ถูกจำกัดการใช้งาน (Rate Limit) กรุณารอสักครู่แล้วลองใหม่');
-        setIsScanning(false);
-        return;
-      }
+      if (!response.ok) throw new Error("อัปโหลดล้มเหลว");
 
-      setProgress(80);
       const result = await response.json();
 
-      if (result.success && Array.isArray(result.data)) {
-        setCustomerLogs((prevLogs) => {
-          let updatedLogs = [...prevLogs];
-
-          result.data.forEach((customerData: any, index: number) => {
-            const dbRow = (result.dbData && result.dbData[index]) ? result.dbData[index] : null;
-            const existingIndex = updatedLogs.findIndex(log => log.name === customerData.name);
-
-            if (existingIndex >= 0) {
-              const existing = updatedLogs[existingIndex];
-              const newItemsPrice = customerData.items.reduce((sum: number, item: any) => sum + item.price, 0);
-              updatedLogs[existingIndex] = {
-                ...existing,
-                itemsCount: existing.itemsCount + customerData.items.length,
-                totalPrice: existing.totalPrice + newItemsPrice, // ไม่บวกค่าส่งซ้ำ เพราะบวกไปแล้วตอนสร้างครั้งแรก
-                items: [...existing.items, ...customerData.items]
-              };
-            } else {
-              updatedLogs.push({
-                id: dbRow ? dbRow.id.toString() : Date.now().toString() + Math.random().toString(36).substr(2, 5),
-                initials: customerData.name.substring(0, 2).toUpperCase(),
-                name: customerData.name,
-                itemsCount: customerData.items.length,
-                status: 'PROCESSED',
-                totalPrice: customerData.items.reduce((sum: number, item: any) => sum + item.price, 0) + 40, // บวกค่าส่ง 40 บาท ครั้งเดียว
-                items: customerData.items
-              });
-            }
-          });
-          return updatedLogs;
-        });
-      } else {
-        console.error("API Error:", result.error || "Unexpected response format");
+      if (result.success && Array.isArray(result.dbData)) {
+        // อัปเดตรายชื่อและยอดเงินทั้งหมดขึ้นหน้าจอเว็บให้ทันที
+        setCustomerLogs(result.dbData.map((dbRow: any) => ({
+          id: dbRow.id.toString(),
+          initials: dbRow.name.substring(0, 2).toUpperCase(),
+          name: dbRow.name,
+          itemsCount: dbRow.items_count,
+          status: dbRow.status,
+          totalPrice: dbRow.total_price,
+          items: dbRow.items || []
+        })));
       }
+
     } catch (error) {
-      console.error("Error scanning files:", error);
+      console.error("Error sending files:", error);
+      alert("เน็ตมือถือขัดข้องระหว่างอัปโหลด กรุณาลองใหม่อีกครั้งครับน้า");
     }
 
     setProgress(100);
     setIsScanning(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
-
   return (
     <div className="min-h-screen bg-[#f8fafc] text-[#1e293b] pb-20 md:pb-0">
       <div className="flex flex-col md:flex-row min-h-screen">
