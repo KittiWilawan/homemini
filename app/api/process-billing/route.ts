@@ -77,15 +77,15 @@ export async function POST(req: NextRequest) {
         }
 
         const dbInsertPayload = cleanJsonArray.map((cleanJson: any) => {
-            // เพิ่มค่าจัดส่ง 40 บาททุกรายการ
             if (!cleanJson.items) cleanJson.items = [];
-            cleanJson.items.push({ type: 'shipping', price: 40 });
+
+            const itemsTotal = cleanJson.items.reduce((sum: number, item: any) => sum + (item.price || 0), 0);
 
             return {
                 name: cleanJson.name,
                 items: cleanJson.items,
                 items_count: cleanJson.items.length,
-                total_price: cleanJson.items.reduce((sum: number, item: any) => sum + (item.price || 0), 0),
+                total_price: itemsTotal + 40, // บวกค่าส่ง 40 บาท ครั้งเดียวต่อลูกค้า
                 status: 'PROCESSED'
             };
         });
@@ -104,12 +104,12 @@ export async function POST(req: NextRequest) {
 
     } catch (error: any) {
         console.error('Server Error:', error);
-        
+
         // Pass 429 status to client if rate limit is hit
         if (error.status === 429 || error.message?.includes('429') || error.message?.includes('quota')) {
             return NextResponse.json({ success: false, error: error.message }, { status: 429 });
         }
-        
+
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 }
@@ -117,14 +117,18 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
     try {
         const body = await req.json();
-        const { id, ids } = body;
-        
-        if (id) {
+        const { id, ids, deleteAll } = body;
+
+        if (deleteAll) {
+            // ลบข้อมูลทั้งหมดใน customer_logs
+            const { error } = await supabase.from('customer_logs').delete().neq('id', 0);
+            if (error) console.error('Delete all error:', error);
+        } else if (id) {
             await supabase.from('customer_logs').delete().eq('id', id);
         } else if (ids && Array.isArray(ids)) {
             await supabase.from('customer_logs').delete().in('id', ids);
         }
-        
+
         return NextResponse.json({ success: true });
     } catch (error: any) {
         console.error('Delete Error:', error);

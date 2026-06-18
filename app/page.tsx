@@ -31,14 +31,13 @@ export default function DashboardPage() {
   };
 
   const handleClearAll = async () => {
-    if (confirm('ยืนยันการล้างข้อมูลทั้งหมด?')) {
-      const ids = customerLogs.map(log => log.id);
+    if (confirm('ยืนยันการล้างข้อมูลทั้งหมด? (รวมถึงข้อมูลใน Database)')) {
       setCustomerLogs([]);
       try {
         await fetch('/api/process-billing', {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids })
+          body: JSON.stringify({ deleteAll: true })
         });
       } catch (err) { console.error(err); }
     }
@@ -81,75 +80,71 @@ export default function DashboardPage() {
     setIsScanning(true);
     setProgress(0);
 
-    const BATCH_SIZE = 5;
-    for (let i = 0; i < filesArray.length; i += BATCH_SIZE) {
-      const batch = filesArray.slice(i, i + BATCH_SIZE);
+    try {
+      // บีบอัดรูปทั้งหมดพร้อมกัน
+      setProgress(10);
+      const compressedFiles = await Promise.all(
+        filesArray.map((file) => compressImage(file))
+      );
 
-      try {
-        const formData = new FormData();
-        await Promise.all(batch.map(async (file) => {
-          const compressedFile = await compressImage(file);
-          formData.append('images', compressedFile);
-        }));
+      // ยัดทุกรูปลง FormData เดียว → ส่ง API ครั้งเดียว
+      const formData = new FormData();
+      compressedFiles.forEach((file) => formData.append('images', file));
 
-        const response = await fetch('/api/process-billing', {
-          method: 'POST',
-          body: formData,
-        });
+      setProgress(30);
+      const response = await fetch('/api/process-billing', {
+        method: 'POST',
+        body: formData,
+      });
 
-        if (response.status === 429) {
-          console.warn("Rate limit hit! Waiting 60 seconds...");
-          await new Promise(resolve => setTimeout(resolve, 60000));
-          i -= BATCH_SIZE; // Retry this batch
-          continue;
-        }
+      if (response.status === 429) {
+        alert('ถูกจำกัดการใช้งาน (Rate Limit) กรุณารอสักครู่แล้วลองใหม่');
+        setIsScanning(false);
+        return;
+      }
 
-        const result = await response.json();
+      setProgress(80);
+      const result = await response.json();
 
-        if (result.success && Array.isArray(result.data)) {
-          setCustomerLogs((prevLogs) => {
-            let updatedLogs = [...prevLogs];
+      if (result.success && Array.isArray(result.data)) {
+        setCustomerLogs((prevLogs) => {
+          let updatedLogs = [...prevLogs];
 
-            result.data.forEach((customerData: any, index: number) => {
-              const dbRow = (result.dbData && result.dbData[index]) ? result.dbData[index] : null;
-              const existingIndex = updatedLogs.findIndex(log => log.name === customerData.name);
+          result.data.forEach((customerData: any, index: number) => {
+            const dbRow = (result.dbData && result.dbData[index]) ? result.dbData[index] : null;
+            const existingIndex = updatedLogs.findIndex(log => log.name === customerData.name);
 
-              if (existingIndex >= 0) {
-                const existing = updatedLogs[existingIndex];
-                updatedLogs[existingIndex] = {
-                  ...existing,
-                  itemsCount: existing.itemsCount + customerData.items.length,
-                  totalPrice: existing.totalPrice + customerData.items.reduce((sum: number, item: any) => sum + item.price, 0),
-                  items: [...existing.items, ...customerData.items]
-                };
-              } else {
-                updatedLogs.push({
-                  id: dbRow ? dbRow.id.toString() : Date.now().toString() + Math.random().toString(36).substr(2, 5),
-                  initials: customerData.name.substring(0, 2).toUpperCase(),
-                  name: customerData.name,
-                  itemsCount: customerData.items.length,
-                  status: 'PROCESSED',
-                  totalPrice: customerData.items.reduce((sum: number, item: any) => sum + item.price, 0),
-                  items: customerData.items
-                });
-              }
-            });
-            return updatedLogs;
+            if (existingIndex >= 0) {
+              const existing = updatedLogs[existingIndex];
+              const newItemsPrice = customerData.items.reduce((sum: number, item: any) => sum + item.price, 0);
+              updatedLogs[existingIndex] = {
+                ...existing,
+                itemsCount: existing.itemsCount + customerData.items.length,
+                totalPrice: existing.totalPrice + newItemsPrice, // ไม่บวกค่าส่งซ้ำ เพราะบวกไปแล้วตอนสร้างครั้งแรก
+                items: [...existing.items, ...customerData.items]
+              };
+            } else {
+              updatedLogs.push({
+                id: dbRow ? dbRow.id.toString() : Date.now().toString() + Math.random().toString(36).substr(2, 5),
+                initials: customerData.name.substring(0, 2).toUpperCase(),
+                name: customerData.name,
+                itemsCount: customerData.items.length,
+                status: 'PROCESSED',
+                totalPrice: customerData.items.reduce((sum: number, item: any) => sum + item.price, 0) + 40, // บวกค่าส่ง 40 บาท ครั้งเดียว
+                items: customerData.items
+              });
+            }
           });
-        } else {
-          console.error("API Error:", result.error || "Unexpected response format");
-        }
-      } catch (error) {
-        console.error("Error scanning file batch:", error);
+          return updatedLogs;
+        });
+      } else {
+        console.error("API Error:", result.error || "Unexpected response format");
       }
-
-      setProgress(Math.round(((i + batch.length) / filesArray.length) * 100));
-
-      // Delay to respect Gemini Free Tier Limit (15 RPM = ~4s per request)
-      if (i + BATCH_SIZE < filesArray.length) {
-        await new Promise(resolve => setTimeout(resolve, 4500));
-      }
+    } catch (error) {
+      console.error("Error scanning files:", error);
     }
+
+    setProgress(100);
     setIsScanning(false);
   };
 
@@ -262,8 +257,19 @@ export default function DashboardPage() {
                     .map((log) => (
                       <tr key={log.id} className="text-sm">
                         <td className="px-5 py-4 font-semibold text-[#0f172a] flex items-center gap-2">
-                          <button onClick={() => handleDeleteLog(log.id)} className="text-red-400 hover:text-red-600 text-lg mr-1" title="Delete">🗑️</button>
-                          <span className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center text-xs">{log.initials}</span>
+                          <button
+                            onClick={() => {
+                              const prices = log.items.map((item: any) => item.price);
+                              const text = `${prices.join('+')}+40=${log.totalPrice}`;
+                              navigator.clipboard.writeText(text);
+                              alert(`คัดลอก: ${text}`);
+                            }}
+                            className="text-[10px] bg-[#f1f5f9] hover:bg-[#e2e8f0] text-[#475569] px-2 py-1 rounded transition-colors shrink-0"
+                            title="Copy calculation"
+                          >
+                            📋
+                          </button>
+                          <span className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center text-xs shrink-0">{log.initials}</span>
                           {log.name}
                         </td>
                         <td className="px-5 py-4 text-[#475569]">{log.itemsCount} Items</td>
@@ -271,25 +277,10 @@ export default function DashboardPage() {
                           <span className="text-[10px] font-bold bg-[#dcfce7] text-[#15803d] px-2 py-1 rounded-full">● {log.status}</span>
                         </td>
                         <td className="px-5 py-4 font-bold">
-                          <div className="flex items-center justify-between gap-2">
-                            <span>{log.totalPrice.toLocaleString()} บาท</span>
-                            {log.itemsCount > 1 && (
-                              <button
-                                onClick={() => {
-                                  const prices = log.items.map((item: any) => item.price);
-                                  const text = `${prices.join('+')}=${log.totalPrice}`;
-                                  navigator.clipboard.writeText(text);
-                                  alert(`คัดลอก: ${text}`);
-                                }}
-                                className="text-[10px] bg-[#f1f5f9] hover:bg-[#e2e8f0] text-[#475569] px-2 py-1 rounded transition-colors"
-                                title="Copy calculation"
-                              >
-                                📋 Copy
-                              </button>
-                            )}
-                          </div>
+                          {log.totalPrice.toLocaleString()} บาท
                         </td>
                       </tr>
+
                     ))}
                   {customerLogs.length === 0 && (
                     <tr>
