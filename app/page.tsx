@@ -72,6 +72,7 @@ export default function DashboardPage() {
       reader.onerror = error => reject(error);
     });
   };
+
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files) return;
     const filesArray = Array.from(event.target.files);
@@ -80,98 +81,73 @@ export default function DashboardPage() {
     setProgress(0);
 
     try {
-      setProgress(5);
-      console.log("กำลังบีบอัดรูปภาพทั้งหมด...");
+      // บีบอัดรูปทั้งหมดพร้อมกัน
+      setProgress(10);
       const compressedFiles = await Promise.all(
         filesArray.map((file) => compressImage(file))
       );
 
-      const batchSize = 4; // มัดรวมส่งก้อนย่อยทีละ 4 รูป
-      let i = 0;
+      // ยัดทุกรูปลง FormData เดียว → ส่ง API ครั้งเดียว
+      const formData = new FormData();
+      compressedFiles.forEach((file) => formData.append('images', file));
 
-      while (i < compressedFiles.length) {
-        const currentBatch = compressedFiles.slice(i, i + batchSize);
-        console.log(`กำลังประมวลผลรูปที่ ${i + 1} ถึง ${Math.min(i + batchSize, compressedFiles.length)}...`);
+      setProgress(30);
+      const response = await fetch('/api/process-billing', {
+        method: 'POST',
+        body: formData,
+      });
 
-        const formData = new FormData();
-        currentBatch.forEach((file) => formData.append('images', file));
-
-        const response = await fetch('/api/process-billing', {
-          method: 'POST',
-          body: formData,
-        });
-
-        // 2. ⏳ เช็คก่อนเลยว่าติด Rate Limit (Status 429) หรือไม่
-        if (response.status === 429) {
-          console.warn(`⚠️ ติดลิมิตความเร็วของ Google! ระบบจะหยุดรอ 15 วินาที แล้วจะทำงานต่ออัตโนมัติ...`);
-          // สั่งหยุดรอนิ่งๆ 15 วินาที
-          await new Promise((resolve) => setTimeout(resolve, 15000));
-          // วนลูปกลับไปทำรูปกลุ่มเดิมซ้ำ (ไม่เพิ่มค่า i และไม่รันโค้ดด้านล่างต่อ)
-          continue;
-        }
-
-        // 3. แปลงข้อมูลเป็น JSON (ย้ายมาไว้ตรงนี้หลังจากมั่นใจแล้วว่าไม่ติดลิมิต 429)
-        const result = await response.json();
-
-        // 4. เช็คความสำเร็จของข้อมูล
-        if (result.success && Array.isArray(result.data)) {
-          setCustomerLogs((prevLogs) => {
-            let updatedLogs = [...prevLogs];
-
-            result.data.forEach((customerData: any, index: number) => {
-              const dbRow = (result.dbData && result.dbData[index]) ? result.dbData[index] : null;
-              const existingIndex = updatedLogs.findIndex(log => log.name === customerData.name);
-
-              if (existingIndex >= 0) {
-                const existing = updatedLogs[existingIndex];
-                const newItemsPrice = customerData.items.reduce((sum: number, item: any) => sum + item.price, 0);
-                updatedLogs[existingIndex] = {
-                  ...existing,
-                  itemsCount: existing.itemsCount + customerData.items.length,
-                  totalPrice: existing.totalPrice + newItemsPrice,
-                  items: [...existing.items, ...customerData.items]
-                };
-              } else {
-                updatedLogs.push({
-                  id: dbRow ? dbRow.id.toString() : Date.now().toString() + Math.random().toString(36).substr(2, 5),
-                  initials: customerData.name.substring(0, 2).toUpperCase(),
-                  name: customerData.name,
-                  itemsCount: customerData.items.length,
-                  status: 'PROCESSED',
-                  totalPrice: customerData.items.reduce((sum: number, item: any) => sum + item.price, 0) + 40,
-                  items: customerData.items
-                });
-              }
-            });
-            return updatedLogs;
-          });
-
-          // ✅ สแกนผ่านแล้ว ขยับคิวไปก้อนถัดไป
-          i += batchSize;
-
-          const currentProgress = Math.min(i, compressedFiles.length);
-          setProgress(Math.round((currentProgress / compressedFiles.length) * 100));
-
-          // หน่วงเวลาเซฟโควตา 2 วินาทีระหว่างก้อน
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-
-        } else {
-          // 🛑 ตรงนี้แหละครับ! ตอนนี้จะรู้จักตัวแปร result 100% ปลอดภัยแน่นอน
-          console.error("API Error:", result.error || "Unexpected response format");
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          i += batchSize;
-        }
+      if (response.status === 429) {
+        alert('ถูกจำกัดการใช้งาน (Rate Limit) กรุณารอสักครู่แล้วลองใหม่');
+        setIsScanning(false);
+        return;
       }
 
+      setProgress(80);
+      const result = await response.json();
+
+      if (result.success && Array.isArray(result.data)) {
+        setCustomerLogs((prevLogs) => {
+          let updatedLogs = [...prevLogs];
+
+          result.data.forEach((customerData: any, index: number) => {
+            const dbRow = (result.dbData && result.dbData[index]) ? result.dbData[index] : null;
+            const existingIndex = updatedLogs.findIndex(log => log.name === customerData.name);
+
+            if (existingIndex >= 0) {
+              const existing = updatedLogs[existingIndex];
+              const newItemsPrice = customerData.items.reduce((sum: number, item: any) => sum + item.price, 0);
+              updatedLogs[existingIndex] = {
+                ...existing,
+                itemsCount: existing.itemsCount + customerData.items.length,
+                totalPrice: existing.totalPrice + newItemsPrice, // ไม่บวกค่าส่งซ้ำ เพราะบวกไปแล้วตอนสร้างครั้งแรก
+                items: [...existing.items, ...customerData.items]
+              };
+            } else {
+              updatedLogs.push({
+                id: dbRow ? dbRow.id.toString() : Date.now().toString() + Math.random().toString(36).substr(2, 5),
+                initials: customerData.name.substring(0, 2).toUpperCase(),
+                name: customerData.name,
+                itemsCount: customerData.items.length,
+                status: 'PROCESSED',
+                totalPrice: customerData.items.reduce((sum: number, item: any) => sum + item.price, 0) + 40, // บวกค่าส่ง 40 บาท ครั้งเดียว
+                items: customerData.items
+              });
+            }
+          });
+          return updatedLogs;
+        });
+      } else {
+        console.error("API Error:", result.error || "Unexpected response format");
+      }
     } catch (error) {
       console.error("Error scanning files:", error);
-      alert("เกิดข้อผิดพลาดในการเชื่อมต่อระบบ");
     }
 
     setProgress(100);
     setIsScanning(false);
-    alert("🎉 ระบบคิวอัจฉริยะสแกนบิลครบถ้วนทุกใบเรียบร้อยแล้วครับน้า!");
   };
+
   return (
     <div className="min-h-screen bg-[#f8fafc] text-[#1e293b] pb-20 md:pb-0">
       <div className="flex flex-col md:flex-row min-h-screen">
