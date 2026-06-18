@@ -2,14 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 import { supabase } from '@/lib/supabase';
 
-// 🌟 ขั้นตอนที่ 1: คลังแสงรวบรวมกุญแจวิชาแยกเงา 5 ร่าง (ดึงมาจากไฟล์ .env.local)
+// คลังแสงรวบรวมกุญแจวิชาแยกเงา 5 ร่าง
 const apiKeys = [
     process.env.GEMINI_API_KEY_1 || '',
     process.env.GEMINI_API_KEY_2 || '',
     process.env.GEMINI_API_KEY_3 || '',
     process.env.GEMINI_API_KEY_4 || '',
     process.env.GEMINI_API_KEY_5 || ''
-].filter(key => key !== ''); // กรองเอาเฉพาะคีย์ที่มีการกรอกข้อมูลไว้จริง
+].filter(key => key !== '');
 
 export async function POST(req: NextRequest) {
     try {
@@ -20,14 +20,9 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, error: 'ไม่พบไฟล์รูปภาพ' }, { status: 400 });
         }
 
-        // 🚨 แจ้งเตือนความปลอดภัย เผื่อน้ายังไม่ได้ตั้งค่าคีย์ในไฟล์ .env.local
         if (apiKeys.length === 0) {
             return NextResponse.json({ success: false, error: 'ระบบตรวจสอบไม่พบคีย์กูเกิลในไฟล์ env' }, { status: 500 });
         }
-
-        // 🌟 ขั้นตอนที่ 2: คาถาแยกเงาพันร่าง! สุ่มหยิบกุญแจ 1 ใน 5 ใบขึ้นมาประมวลผลรูปในรอบนี้
-        const randomKey = apiKeys[Math.floor(Math.random() * apiKeys.length)];
-        const ai = new GoogleGenAI({ apiKey: randomKey });
 
         const inlineDataParts = await Promise.all(imageFiles.map(async (file) => {
             const bytes = await file.arrayBuffer();
@@ -66,16 +61,58 @@ export async function POST(req: NextRequest) {
           ]
         }
       ]
-      
-      ⚠️ ย้ำอีกครั้ง: ราคาที่ return มาต้องเป็นราคาที่อยู่ในข้อความปักหมุดเท่านั้น ห้ามนำราคาจากแชทอื่นมาใส่เด็ดขาด
     `;
 
-        // 🌟 รันผ่านโมเดล 2.5-flash ตัวหลักด้วยกุญแจที่สุ่มขึ้นมาเมื่อกี้
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: [prompt, ...inlineDataParts],
-        });
+        let response = null;
+        let aiSuccess = false;
 
+        // 🔄 ⚡ ลูปเวอร์ชันทรหด: สลับคีย์อัตโนมัติ + หน่วงเวลาตั้งหลักเผื่อเซิร์ฟเวอร์กูเกิลล่ม (503)
+        for (let k = 0; k < apiKeys.length; k++) {
+            try {
+                console.log(`[ระบบคิว] พยายามใช้กุญแจร่างเงาที่ ${k + 1}/${apiKeys.length}`);
+                const ai = new GoogleGenAI({ apiKey: apiKeys[k] });
+
+                response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: [prompt, ...inlineDataParts],
+                });
+
+                // ถ้ายิงสำเร็จเรียบร้อย
+                aiSuccess = true;
+                console.log(`✅ กุญแจร่างเงาที่ ${k + 1} ทำงานสำเร็จอย่างสมบูรณ์!`);
+                break;
+
+            } catch (error: any) {
+                const isRateLimit = error.status === 429 || error.message?.includes('429') || error.message?.includes('quota');
+                const isServerOverload = error.status === 503 || error.message?.includes('503') || error.message?.includes('UNAVAILABLE');
+
+                if (isRateLimit) {
+                    console.warn(`⚠️ กุญแจที่ ${k + 1} ติด Cooldown (429)! กำลังสลับไปใช้กุญแจถัดไป...`);
+                    continue; // สลับไปคีย์ถัดไปทันที
+                }
+
+                else if (isServerOverload) {
+                    // 🌟 ท่าแก้บั๊ก 503: ถ้าเซิร์ฟเวอร์กูเกิลคนใช้เยอะจัด ให้ใจเย็นๆ หยุดรอ 3 วินาที แล้วค่อยไปคีย์ถัดไป
+                    console.warn(`🔥 เซิร์ฟเวอร์กูเกิลล่มชั่วคราว (503)! กำลังหยุดรอตั้งหลัก 3 วินาที แล้วจะสลับไปคีย์ถัดไป...`);
+                    await new Promise((resolve) => setTimeout(resolve, 3000));
+                    continue;
+                }
+
+                else {
+                    // เผื่อเจอ Error แปลกปลอมอื่นๆ ก็ให้อดทนสลับไปคีย์ถัดไป ดีกว่าปล่อยให้โปรแกรมค้างตายครับน้า
+                    console.error(`❌ กุญแจที่ ${k + 1} เจอ Error อื่นๆ:`, error.message);
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
+                    continue;
+                }
+            }
+        }
+        // 🚨 ดักแก่: ถ้าลองครบทุกคีย์แล้วไม่มีตัวไหนผ่านเลย
+        if (!aiSuccess || !response) {
+            console.error('💥 หมดท่า! ร่างเงาทุกตัวติด Cooldown พร้อมกันทั้งหมด');
+            return NextResponse.json({ success: false, error: 'กุญแจทุกดอกติดขัดชั่วคราว' }, { status: 429 });
+        }
+
+        // แปลงข้อมูลข้อความจาก AI เป็น JSON แบบปลอดภัย
         const aiText = response.text || '[]';
         let cleanJsonArray = JSON.parse(aiText.replace(/```json/g, '').replace(/```/g, '').trim());
 
@@ -83,28 +120,23 @@ export async function POST(req: NextRequest) {
             cleanJsonArray = cleanJsonArray.name ? [cleanJsonArray] : [];
         }
 
-        // กรองเอาเฉพาะข้อมูลที่มีชื่อคนจริงๆ ป้องกัน Array ว่างเปล่าทำหน้าเว็บล่ม
         cleanJsonArray = cleanJsonArray.filter((item: any) => item && item.name && item.name.trim() !== '');
 
         const finalProcessedData: any[] = [];
 
-        // 🌟 ขั้นตอนที่ 3: ปรับโครงสร้างลูปใหม่เพื่อ "ป้องกันข้อมูลซ้ำ" และ "รวมยอดสะสม" เข้า Supabase
+        // 📊 บันทึกและสะสมยอดเงินเข้าฐานข้อมูล Supabase 
         for (const cleanJson of cleanJsonArray) {
             if (!cleanJson.items) cleanJson.items = [];
 
-            // 🔍 ไปค้นหาในตารางก่อนว่าวันนี้เคยเก็บเงินของลูกค้าชื่อนี้ไปแล้วหรือยัง
             const { data: existingRecords } = await supabase
                 .from('customer_logs')
                 .select('*')
                 .eq('name', cleanJson.name.trim());
 
             if (existingRecords && existingRecords.length > 0) {
-                // 📝 เจอคนเดิม! จัดการรวบรวมของเก่าและของใหม่เข้าด้วยกัน
                 const oldRecord = existingRecords[0];
                 const combinedItems = [...(oldRecord.items || []), ...cleanJson.items];
                 const totalItemsPrice = combinedItems.reduce((sum: number, item: any) => sum + (item.price || 0), 0);
-
-                // คำนวณยอดรวมสินค้าทั้งหมด แล้วบวกค่าส่งปิดท้าย 40 บาททีเดียว
                 const finalTotalPrice = totalItemsPrice + 40;
 
                 const { data: updatedData } = await supabase
@@ -120,7 +152,6 @@ export async function POST(req: NextRequest) {
 
                 if (updatedData && updatedData[0]) finalProcessedData.push(updatedData[0]);
             } else {
-                // 🆕 ลูกค้าใหม่แกะกล่อง! ยิงบันทึกแถวใหม่เข้าไปในระบบปกติ
                 const itemsTotal = cleanJson.items.reduce((sum: number, item: any) => sum + (item.price || 0), 0);
 
                 const { data: insertedData } = await supabase
@@ -138,14 +169,12 @@ export async function POST(req: NextRequest) {
             }
         }
 
-        // คืนค่าผลลัพธ์ข้อมูลล่าสุดใน Database (dbData) กลับไปโชว์ที่หน้า Dashboard
+        // 🌟 จุดเปลี่ยนชีวิต: ส่งข้อมูลที่ประมวลผลเสร็จแล้วกลับไปแจ้งหน้าบ้านทันที เพื่อให้หน้าบ้านขยับคิวรูปถัดไปได้
         return NextResponse.json({ success: true, data: cleanJsonArray, dbData: finalProcessedData });
 
     } catch (error: any) {
-        console.error('Server Error:', error);
-        if (error.status === 429 || error.message?.includes('429') || error.message?.includes('quota')) {
-            return NextResponse.json({ success: false, error: error.message }, { status: 429 });
-        }
+        console.error('Server Critical Error:', error);
+        // ส่งสถานะกลับไปหน้าบ้านเสมอ ห้ามปล่อยให้หน้าบ้านยืนงงค้างเติ่ง
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 }
@@ -156,7 +185,6 @@ export async function DELETE(req: NextRequest) {
         const { id, ids, deleteAll } = body;
 
         if (deleteAll) {
-            // ปรับคำสั่งล้างข้อมูลทั้งหมดให้ปลอดภัยและทำงานได้จริงบน PostgreSQL
             const { error } = await supabase.from('customer_logs').delete().not('id', 'is', null);
             if (error) throw error;
         } else if (id) {
@@ -164,7 +192,6 @@ export async function DELETE(req: NextRequest) {
         } else if (ids && Array.isArray(ids)) {
             await supabase.from('customer_logs').delete().in('id', ids);
         }
-
         return NextResponse.json({ success: true });
     } catch (error: any) {
         console.error('Delete Error:', error);
