@@ -180,16 +180,15 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
     try {
         const body = await req.json();
-        const { id, ids, deleteAll } = body;
+        const { deleteAll } = body; // รับค่าคำสั่งล้างทั้งหมดจากหน้าบ้าน
 
         if (deleteAll) {
-            const { error } = await supabase.from('customer_logs').delete().not('id', 'is', null);
+            const { error } = await supabase.rpc('truncate_customer_logs');
+
             if (error) throw error;
-        } else if (id) {
-            await supabase.from('customer_logs').delete().eq('id', id);
-        } else if (ids && Array.isArray(ids)) {
-            await supabase.from('customer_logs').delete().in('id', ids);
+            console.log("💥 [เซิร์ฟเวอร์] สั่ง TRUNCATE ล้างตารางและรีเซ็ต ID นับ 1 ใหม่เรียบร้อยแล้ว!");
         }
+
         return NextResponse.json({ success: true });
     } catch (error: any) {
         console.error('Delete Error:', error);
