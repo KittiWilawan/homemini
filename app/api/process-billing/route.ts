@@ -93,7 +93,7 @@ function isSimilarName(name1: string, name2: string): boolean {
     const n1 = normalizeName(name1);
     const n2 = normalizeName(name2);
     if (n1 === n2) return true;
-    
+
     // ถ้าชื่อยาวเกิน 3 ตัวอักษร และตัวสะกดเพี้ยนแค่ 1-2 ตัว ให้ถือว่าเป็นคนเดียวกัน (เช่น Wisanu กับ Wisnu)
     if (n1.length > 3 && n2.length > 3) {
         const distance = levenshteinDistance(n1, n2);
@@ -115,23 +115,27 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, error: 'ไม่พบ API key' }, { status: 500 });
         }
 
-        // ===== 🧠 Prompt แบบเน้นเฉพาะ "ปักหมุด" + (Batch Mode) =====
-        const prompt = `ฉันจะส่งรูปแคปหน้าจอหลายๆ รูปให้คุณ
-หน้าที่ของคุณคือ ดึงชื่อลูกค้าและราคาสินค้าจาก "ข้อความปักหมุด (Pinned Message / Pinned Comment)" เท่านั้น! แล้วนำข้อมูลจากทุกรูปมา "รวมกัน" ให้เป็นสรุปเดียว
+        // ===== 🧠 Prompt TikTok Live (Batch Mode) — ให้ AI เทียบรูปโปรไฟล์ให้เลย =====
+        const prompt = `ฉันจะส่งรูปแคปหน้าจอหลายๆ รูปให้คุณ (ส่วนใหญ่มาจาก TikTok Live)
+หน้าที่ของคุณคือ ดึงชื่อลูกค้าและราคาสินค้าจากทุกรูปมา "รวมกัน" ให้เป็นสรุปเดียว
 
-กฎเหล็กสำหรับการรวมข้อมูล (สำคัญมากห้ามฝ่าฝืน):
-1. **ดูเฉพาะข้อความปักหมุด**: ห้ามดึงข้อมูลจากคอมเมนต์แชทธรรมดาเด็ดขาด! ให้สนใจแค่ข้อความที่มีสัญลักษณ์ปักหมุด (Pinned) หรืออยู่ตำแหน่งปักหมุดเท่านั้น
-2. **เทียบรูปโปรไฟล์**: สังเกตรูปโปรไฟล์ของลูกค้าในข้อความปักหมุดแต่ละรูปให้ดี ถ้า "รูปโปรไฟล์เหมือนกัน" แต่ชื่อสะกดเพี้ยนไปนิดหน่อย (เช่น Wisanu กับ Wisnu) ให้ถือว่าเป็น "ลูกค้าคนเดียวกัน" และรวบยอดบิลเข้าด้วยกันเลย
-3. **ชื่อลูกค้า**: ดึงชื่อตามที่ปรากฏ "ห้ามแปลภาษาไทยเป็นอังกฤษเด็ดขาด"
-4. **สินค้าและราคา**: ดึงชื่อสินค้าและ "ราคาต่อชิ้น" จากปักหมุด ห้ามเอายอดรวมหรือจำนวนชิ้นมาใส่เป็นราคา
-5. **ค่าส่ง**: ถ้าในปักหมุดมีคำว่าค่าส่ง ห้ามนำมานับเป็นสินค้าเด็ดขาด
+กฎเหล็กสำหรับการรวมข้อมูล (สำคัญมาก):
+1. **ดึงเฉพาะข้อความปักหมุด (Pinned เท่านั้น)**: ห้ามดึงชื่อจากคอมเมนต์ที่พิมพ์พูดคุยหรือ CF ในแชทเด็ดขาด! ให้ดึงเฉพาะคนที่ "ได้รับการปักหมุดสรุปยอด" หรือ "ข้อความที่ถูกไฮไลท์บนหน้าจอ" เท่านั้น
+2. **เทียบรูปโปรไฟล์**: สังเกตรูปโปรไฟล์ของลูกค้าในแต่ละรูปภาพให้ดี ถ้า "รูปโปรไฟล์เหมือนกัน" แต่ชื่อสะกดเพี้ยนไปนิดหน่อย ให้ถือว่าเป็น "ลูกค้าคนเดียวกัน" และจับรวบยอดซื้อเข้าด้วยกันเลย
+3. **ชื่อภาษาไทยเป็นหลัก**: ห้ามแปลภาษาไทยเป็นอังกฤษเด็ดขาด! ถ้าลูกค้ามีชื่อภาษาไทย (เช่น "ทอง") ให้พิมพ์ภาษาไทยกลับมาเป๊ะๆ ห้ามสะกดเป็นคาราโอเกะ (ห้ามตอบ thona) และถ้าใน TikTok มีทั้ง @username กับชื่อไทย ให้เลือกใช้ **ชื่อไทย** เสมอ
+4. **สินค้าและราคา**: ดึงชื่อสินค้าและ "ราคาต่อชิ้น" ห้ามเอายอดโอนรวมมาใส่เป็นราคา
+5. **ค่าส่ง**: ห้ามนำค่าส่งมาใส่เป็นสินค้าเด็ดขาด
 
-ตอบกลับเป็น JSON Array โดยรวมยอดคนที่รูปโปรไฟล์/ชื่อเหมือนกันให้เรียบร้อย (ถ้าไม่มีรูปไหนมีปักหมุดเลยให้ตอบ []):
-[{"name":"ชื่อลูกค้า","items":[{"type":"ชื่อสินค้า","price":ราคา}]}]`;
+ตอบกลับเป็น JSON Array โดยรวมยอดคนที่รูปโปรไฟล์/ชื่อเหมือนกันให้เรียบร้อย:
+[{"name":"ชื่อลูกค้า (พิมพ์ไทยหรืออังกฤษตามรูปเป๊ะๆ)","items":[{"type":"ชื่อสินค้า","price":ราคา}]}]`;
 
         console.log(`[เซิร์ฟเวอร์] ได้รับ ${imageFiles.length} รูป เริ่มประมวลผล (แบ่งทำทีละ 20 รูป)...`);
 
         const CHUNK_SIZE = 20; // 📦 แบ่งส่งให้ AI ทีละ 20 รูป เพื่อไม่ให้ AI เบลอและไม่หนักเกินไป
+
+        // 🔍 ดึงข้อมูลจาก DB ทั้งหมดมาไว้ใน Memory แค่ครั้งเดียวก่อนเริ่มทำงาน (แก้ปัญหา Next.js Cache)
+        const { data: dbRecords } = await supabase.from('customer_logs').select('*');
+        let allRecords: any[] = dbRecords || [];
 
         for (let chunkStart = 0; chunkStart < imageFiles.length; chunkStart += CHUNK_SIZE) {
             const chunkFiles = imageFiles.slice(chunkStart, chunkStart + CHUNK_SIZE);
@@ -168,9 +172,8 @@ export async function POST(req: NextRequest) {
 
                         const rawName = cleanJson.name.trim();
 
-                        // 🔍 ดึงข้อมูลจาก DB มาเช็ก Fuzzy Match กับของเดิมที่เคยมี
-                        const { data: allRecords } = await supabase.from('customer_logs').select('*');
-                        const oldRecord = allRecords?.find((record: any) => isSimilarName(record.name, rawName));
+                        // 🔍 ค้นหาใน Memory Array แทนการเรียก DB ทุกรอบ
+                        const oldRecord = allRecords.find((record: any) => isSimilarName(record.name, rawName));
 
                         if (oldRecord) {
                             // 🛑 ป้องกันข้อมูลสินค้าซ้ำ (Deduplication)
@@ -186,27 +189,50 @@ export async function POST(req: NextRequest) {
                             const combinedItems = [...(oldRecord.items || []), ...newUniqueItems];
                             const totalItemsPrice = combinedItems.reduce((sum: number, item: any) => sum + (item.price || 0), 0);
 
+                            // อัปเดตใน Memory
+                            oldRecord.items = combinedItems;
+                            oldRecord.items_count = combinedItems.length;
+                            oldRecord.total_price = totalItemsPrice + 40;
+
+                            // อัปเดตลง DB
                             await supabase
                                 .from('customer_logs')
                                 .update({
                                     items: combinedItems,
                                     items_count: combinedItems.length,
-                                    total_price: totalItemsPrice + 40, // +40 ค่าส่งรอบเดียว
+                                    total_price: totalItemsPrice + 40,
                                     status: 'PROCESSED'
                                 })
                                 .eq('id', oldRecord.id);
                         } else {
                             const itemsTotal = cleanJson.items.reduce((sum: number, item: any) => sum + (item.price || 0), 0);
+                            const finalPrice = itemsTotal + 40;
 
-                            await supabase
+                            // เอาไปใส่ DB ก่อนเพื่อเอา ID กลับมา (ถ้าทำได้) หรือใช้วิธี insert ปกติ
+                            const { data: insertedData, error: insertError } = await supabase
                                 .from('customer_logs')
                                 .insert({
-                                    name: rawName, // เก็บชื่อที่ AI เลือกมาให้
+                                    name: rawName,
                                     items: cleanJson.items,
                                     items_count: cleanJson.items.length,
-                                    total_price: itemsTotal + 40,
+                                    total_price: finalPrice,
                                     status: 'PROCESSED'
+                                })
+                                .select(); // ขอข้อมูลที่เพิ่ง insert กลับมาด้วย
+
+                            // เพิ่มลงใน Memory เพื่อให้รอบต่อไปเจอกัน
+                            if (insertedData && insertedData.length > 0) {
+                                allRecords.push(insertedData[0]);
+                            } else {
+                                // ถ้าไม่มี .select() ส่งกลับมาให้ชัวร์ ก็สร้าง object หลอกๆ ไว้เช็กชื่อ
+                                allRecords.push({
+                                    id: Date.now(),
+                                    name: rawName,
+                                    items: cleanJson.items,
+                                    items_count: cleanJson.items.length,
+                                    total_price: finalPrice
                                 });
+                            }
                         }
                     }
                 } catch (jsonError) {
@@ -216,13 +242,13 @@ export async function POST(req: NextRequest) {
         }
 
         // ส่งข้อมูลทั้งหมดจาก DB กลับ (ไม่ใช่แค่ที่เพิ่งประมวลผล)
-        const { data: allRecords } = await supabase
+        const { data: finalRecords } = await supabase
             .from('customer_logs')
             .select('*')
             .order('id', { ascending: true });
 
-        console.log(`✅ เสร็จสิ้น — ข้อมูลทั้งหมด ${allRecords?.length || 0} records`);
-        return NextResponse.json({ success: true, dbData: allRecords || [] });
+        console.log(`✅ เสร็จสิ้น — ข้อมูลทั้งหมด ${finalRecords?.length || 0} records`);
+        return NextResponse.json({ success: true, dbData: finalRecords || [] });
 
     } catch (error: any) {
         console.error('Server Critical Error:', error);
