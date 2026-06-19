@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 interface CustomerLog {
   id: string;
@@ -18,6 +18,41 @@ export default function DashboardPage() {
   const [progress, setProgress] = useState(0);
   const [customerLogs, setCustomerLogs] = useState<CustomerLog[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+
+  // ===== 🔄 โหลดข้อมูลจาก DB =====
+  const loadDataFromDB = useCallback(async () => {
+    try {
+      const res = await fetch('/api/process-billing');
+      if (!res.ok) return;
+      const result = await res.json();
+      if (result.success && Array.isArray(result.dbData)) {
+        setCustomerLogs(result.dbData.map((dbRow: any) => ({
+          id: dbRow.id.toString(),
+          initials: dbRow.name.substring(0, 2).toUpperCase(),
+          name: dbRow.name,
+          itemsCount: dbRow.items_count,
+          status: dbRow.status,
+          totalPrice: dbRow.total_price,
+          items: dbRow.items || []
+        })));
+      }
+    } catch (err) { console.error('Load error:', err); }
+  }, []);
+
+  // โหลดข้อมูลตอนเปิดหน้าเว็บ
+  useEffect(() => { loadDataFromDB(); }, [loadDataFromDB]);
+
+  // ===== 📱 เมื่อกลับมาจากการสลับแอป/เกม → โหลดข้อมูลใหม่จาก DB =====
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('📱 กลับมาจากแอปอื่น → โหลดข้อมูลจาก DB...');
+        loadDataFromDB();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [loadDataFromDB]);
 
   const handleDeleteLog = async (id: string) => {
     setCustomerLogs(prev => prev.filter(log => log.id !== id));
@@ -43,6 +78,7 @@ export default function DashboardPage() {
     }
   };
 
+  // ===== 📸 บีบอัดรูปลด token ที่ AI ต้องอ่าน =====
   const compressImage = async (file: File, maxWidth = 1080): Promise<File> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -78,14 +114,19 @@ export default function DashboardPage() {
     const filesArray = Array.from(event.target.files);
 
     setIsScanning(true);
-    setProgress(15); // สัญญาณบอกว่าระบบกำลังอัปโหลดรูปขึ้นเซิร์ฟเวอร์ให้
+    setProgress(10);
 
     try {
-      const formData = new FormData();
-      // โยนรูปภาพทั้งหมดใส่ตะกร้าเตรียมอัปโหลดในรอบเดียว
-      filesArray.forEach((file) => formData.append('images', file));
+      // 📸 บีบอัดรูปก่อนส่ง → ลด token ที่ AI ต้องอ่าน
+      const compressedFiles = await Promise.all(
+        filesArray.map(file => compressImage(file))
+      );
+      setProgress(25);
 
-      // 🚀 ยิงส่งตูมเดียวขึ้นคลาวด์ Vercel (ใช้เวลาส่งเน็ตแค่แป๊บเดียว)
+      const formData = new FormData();
+      compressedFiles.forEach((file) => formData.append('images', file));
+
+      // 🚀 ส่งขึ้นเซิร์ฟเวอร์ — เซิร์ฟเวอร์จะทำงานต่อแม้สลับแอป
       const response = await fetch('/api/process-billing', {
         method: 'POST',
         body: formData,
@@ -96,7 +137,6 @@ export default function DashboardPage() {
       const result = await response.json();
 
       if (result.success && Array.isArray(result.dbData)) {
-        // อัปเดตรายชื่อและยอดเงินทั้งหมดขึ้นหน้าจอเว็บให้ทันที
         setCustomerLogs(result.dbData.map((dbRow: any) => ({
           id: dbRow.id.toString(),
           initials: dbRow.name.substring(0, 2).toUpperCase(),
@@ -110,7 +150,9 @@ export default function DashboardPage() {
 
     } catch (error) {
       console.error("Error sending files:", error);
-      alert("เน็ตมือถือขัดข้องระหว่างอัปโหลด กรุณาลองใหม่อีกครั้งครับน้า");
+      // ถ้า fetch ขาด (สลับแอป) → ลองโหลดจาก DB แทน
+      console.log('🔄 พยายามโหลดข้อมูลจาก DB...');
+      await loadDataFromDB();
     }
 
     setProgress(100);

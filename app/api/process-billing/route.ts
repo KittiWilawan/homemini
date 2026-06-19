@@ -2,14 +2,65 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 import { supabase } from '@/lib/supabase';
 
-// คลังแสงรวบรวมกุญแจวิชาแยกเงา 5 ร่าง
 const apiKeys = [
-    process.env.GEMINI_API_KEY_1 || '',
-    process.env.GEMINI_API_KEY_2 || '',
-    process.env.GEMINI_API_KEY_3 || '',
-    process.env.GEMINI_API_KEY_4 || '',
-    process.env.GEMINI_API_KEY_5 || ''
+    process.env.GEMINI_API_KEY_1 || ''
 ].filter(key => key !== '');
+
+// ===== ⏱️ Backoff รอ token refresh — Gemini free tier reset ทุก ~60 วินาที =====
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function callGeminiWithRetry(
+    prompt: string,
+    inlineDataParts: any[],
+    imageIndex: number,
+    totalImages: number
+) {
+    const maxAttempts = 5; // รวมทั้งหมดจะลองสูงสุด 5 ครั้ง
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        for (let k = 0; k < apiKeys.length; k++) {
+            try {
+                console.log(`[คิว] รูป ${imageIndex}/${totalImages} → คีย์ ${k + 1} (ครั้งที่ ${attempt})`);
+                const ai = new GoogleGenAI({ apiKey: apiKeys[k] });
+
+                const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: [prompt, ...inlineDataParts],
+                    config: {
+                        responseMimeType: 'application/json', // บังคับ JSON → ลด output token
+                        temperature: 0, // deterministic → ไม่ฟุ่มเฟือย
+                    }
+                });
+
+                return response; // สำเร็จ → ส่งกลับทันที
+            } catch (error: any) {
+                lastError = error;
+                const is429 = error.status === 429 || error.message?.includes('429') || error.message?.includes('quota');
+                const is503 = error.status === 503 || error.message?.includes('503');
+
+                if (is429) {
+                    console.warn(`⏳ คีย์ ${k + 1} token หมด (429) — สลับคีย์ถัดไป`);
+                } else if (is503) {
+                    console.warn(`🔥 เซิร์ฟเวอร์ Google ล่ม (503) — รอ 3 วิ`);
+                    await sleep(3000);
+                } else {
+                    console.error(`❌ คีย์ ${k + 1} error อื่น:`, error.message);
+                }
+            }
+        }
+
+        // ลองทุกคีย์แล้วยังไม่ผ่าน → รอ token refresh แล้วลองใหม่
+        if (attempt < maxAttempts) {
+            const waitSec = Math.min(15 * attempt, 60); // 15, 30, 45, 60 วินาที
+            console.log(`⏰ รอ ${waitSec} วินาที ให้ token reset... (ครั้งที่ ${attempt}/${maxAttempts})`);
+            await sleep(waitSec * 1000);
+        }
+    }
+
+    console.error(`💥 รูป ${imageIndex} ไม่ผ่านหลังลอง ${maxAttempts} ครั้ง — ข้ามไป`);
+    return null;
+}
 
 export async function POST(req: NextRequest) {
     try {
@@ -19,98 +70,38 @@ export async function POST(req: NextRequest) {
         if (!imageFiles || imageFiles.length === 0) {
             return NextResponse.json({ success: false, error: 'ไม่พบไฟล์รูปภาพ' }, { status: 400 });
         }
-
         if (apiKeys.length === 0) {
-            return NextResponse.json({ success: false, error: 'ระบบตรวจสอบไม่พบคีย์กูเกิลในไฟล์ env' }, { status: 500 });
+            return NextResponse.json({ success: false, error: 'ไม่พบ API key' }, { status: 500 });
         }
 
-        const prompt = `
-      คุณคือระบบ AI สำหรับอ่านข้อมูลจาก "ข้อความปักหมุด" (Pinned Message) ในแชทเท่านั้น
-      🚨🚨🚨 กฎเหล็กสำคัญที่สุด — ห้ามละเมิดเด็ดขาด:
-      ❌ ห้ามอ่านข้อความแชทธรรมดา ห้ามเอาราคาจากข้อความที่ไม่ได้ปักหมุด
-      ❌ ห้ามคิดราคาเอง ห้ามเดาราคา ห้ามคำนวณราคาเพิ่มเติม
-      ❌ ห้ามเพิ่มค่าส่ง ห้ามรวมค่าจัดส่ง (ระบบจะเพิ่มค่าส่งเองทีหลัง)
-      ❌ ห้ามเอาตัวเลขจาก timestamp, หมายเลขโทรศัพท์, วันที่, จำนวนชิ้น มาเป็นราคา
+        // ===== 🧠 Prompt v3 — สั้น กระชับ ประหยัด token =====
+        const prompt = `อ่านเฉพาะ "ข้อความปักหมุด" (Pinned Message) ในรูป แล้วดึงชื่อลูกค้า+ราคาสินค้าแต่ละรายการ
 
-      ✅ สิ่งที่ต้องทำ:
-      1. ดูเฉพาะ "ข้อความที่ถูกปักหมุด" (Pinned Message) เท่านั้น — จะมีสัญลักษณ์หมุดหรือแถบพิเศษระบุ
-      2. จากข้อความปักหมุด ให้ดึง "ชื่อลูกค้า" ออกมา (ชื่อลูกค้าอาจเป็นชื่อจริง, ชื่อเล่น, หรือ username)
-      3. จากข้อความปักหมุดเดียวกัน ให้ดึง "ราคาสินค้าแต่ละรายการ" ออกมา — ราคาคือตัวเลขที่เกี่ยวกับมูลค่าสินค้า (เช่น มีคำว่า บาท, ฿, ราคา, ยอด อยู่ใกล้ๆ)
-      4. ถ้าปักหมุดมีรายการสินค้าหลายรายการ ให้ใส่แยกแต่ละ item พร้อมราคาของมัน
-      5. ถ้ารูปไม่มีข้อความปักหมุด หรือไม่มีราคาในปักหมุด → ให้ return array ว่าง []
+กฎ:
+- ดูเฉพาะข้อความปักหมุด (มีสัญลักษณ์หมุดหรือแถบพิเศษ)
+- ห้ามเอาราคาจากแชทธรรมดา ห้ามเดาราคา ห้ามเพิ่มค่าส่ง
+- ห้ามเอาเบอร์โทร/วันที่/เวลา/จำนวนชิ้นมาเป็นราคา
+- ถ้าไม่มีปักหมุดหรือไม่มีราคา → ตอบ []
 
-      📌 สรุป: ชื่อ = จากปักหมุด, ราคา = จากปักหมุดเท่านั้น, ไม่ต้องเพิ่มค่าส่ง
+ตอบ JSON เท่านั้น: [{"name":"ชื่อ","items":[{"type":"สินค้า","price":ราคา}]}]`;
 
-      ส่งข้อมูลกลับมาเป็น JSON Array เท่านั้น ห้ามมีข้อความอื่นใดนอกจาก JSON:
-      [
-        {
-          "name": "ชื่อลูกค้า",
-          "items": [
-            { "type": "ชื่อสินค้า (ถ้ามี) หรือ product", "price": ราคาจากปักหมุดเท่านั้น }
-          ]
-        }
-      ]
-    `;
+        console.log(`[เซิร์ฟเวอร์] ได้รับ ${imageFiles.length} รูป เริ่มประมวลผล...`);
 
-        const finalProcessedData: any[] = [];
-        console.log(`[เซิร์ฟเวอร์] ได้รับรูปภาพทั้งหมด ${imageFiles.length} รูป เริ่มวนลูปประมวลผลบนคลาวด์...`);
-
-        // 🔄 เปลี่ยนจุดนี้: ย้ายลูปประมวลผลรูปภาพจากหน้าบ้าน (มือถือ) มาให้หลังบ้าน (เซิร์ฟเวอร์) จัดการทีละรูป
         for (let i = 0; i < imageFiles.length; i++) {
             const file = imageFiles[i];
             const bytes = await file.arrayBuffer();
             const base64Data = Buffer.from(bytes).toString('base64');
 
-            // จัดฟอร์แมตข้อมูลส่งให้ Gemini ทีละรูป
             const inlineDataParts = [{
-                inlineData: {
-                    data: base64Data,
-                    mimeType: file.type
-                }
+                inlineData: { data: base64Data, mimeType: file.type }
             }];
 
-            let response = null;
-            let aiSuccess = false;
+            // 🧠 เรียก AI พร้อม auto-retry + รอ token refresh
+            const response = await callGeminiWithRetry(prompt, inlineDataParts, i + 1, imageFiles.length);
 
-            // ⚡ ลูปสลับร่างเงา 5 คีย์กรณีติด Cooldown หรือเซิร์ฟเวอร์กูเกิลล่ม (รันเสถียรๆ อยู่บนคลาวด์)
-            for (let k = 0; k < apiKeys.length; k++) {
-                try {
-                    console.log(`[คลาวด์คิว] รูปที่ ${i + 1}/${imageFiles.length} -> พยายามใช้กุญแจร่างเงาที่ ${k + 1}`);
-                    const ai = new GoogleGenAI({ apiKey: apiKeys[k] });
+            if (!response) continue; // ลองหมดแล้วยังไม่ผ่าน → ข้ามรูปนี้
 
-                    response = await ai.models.generateContent({
-                        model: 'gemini-2.5-flash',
-                        contents: [prompt, ...inlineDataParts],
-                    });
-
-                    aiSuccess = true;
-                    break; // สแกนผ่านแล้ว หลุดออกจากลูปเช็คคีย์เพื่อไปบันทึกข้อมูล
-
-                } catch (error: any) {
-                    const isRateLimit = error.status === 429 || error.message?.includes('429') || error.message?.includes('quota');
-                    const isServerOverload = error.status === 503 || error.message?.includes('503') || error.message?.includes('UNAVAILABLE');
-
-                    if (isRateLimit) {
-                        console.warn(`⚠️ คีย์ที่ ${k + 1} ติดคูลดาวน์ (429) สลับไปคีย์ถัดไป...`);
-                        continue;
-                    } else if (isServerOverload) {
-                        console.warn(`🔥 เซิร์ฟเวอร์กูเกิลหนาแน่น (503) หยุดตั้งหลัก 3 วินาที แล้วสลับคีย์...`);
-                        await new Promise((resolve) => setTimeout(resolve, 3000));
-                        continue;
-                    } else {
-                        console.error(`❌ คีย์ที่ ${k + 1} พังด้วยเหตุผลอื่น ข้ามไปคีย์ถัดไป...`);
-                        continue;
-                    }
-                }
-            }
-
-            // ถ้ารูปนี้โชคร้ายจริงๆ สแกนไม่ผ่านทุกคีย์ ให้ข้ามรูปนี้ไปทำรูปถัดไป ระบบจะไม่ค้างตาย
-            if (!aiSuccess || !response) {
-                console.error(`💥 รูปที่ ${i + 1} สแกนไม่ผ่านทุกกุญแจ ข้ามรูปนี้ไปทำงานต่อ...`);
-                continue;
-            }
-
-            // บันทึกและสะสมยอดเงินเข้าตารางฐานข้อมูล Supabase
+            // บันทึกลง Supabase
             try {
                 const aiText = response.text || '[]';
                 let cleanJsonArray = JSON.parse(aiText.replace(/```json/g, '').replace(/```/g, '').trim());
@@ -134,7 +125,7 @@ export async function POST(req: NextRequest) {
                         const combinedItems = [...(oldRecord.items || []), ...cleanJson.items];
                         const totalItemsPrice = combinedItems.reduce((sum: number, item: any) => sum + (item.price || 0), 0);
 
-                        const { data: updatedData } = await supabase
+                        await supabase
                             .from('customer_logs')
                             .update({
                                 items: combinedItems,
@@ -142,14 +133,11 @@ export async function POST(req: NextRequest) {
                                 total_price: totalItemsPrice + 40,
                                 status: 'PROCESSED'
                             })
-                            .eq('id', oldRecord.id)
-                            .select();
-
-                        if (updatedData && updatedData[0]) finalProcessedData.push(updatedData[0]);
+                            .eq('id', oldRecord.id);
                     } else {
                         const itemsTotal = cleanJson.items.reduce((sum: number, item: any) => sum + (item.price || 0), 0);
 
-                        const { data: insertedData } = await supabase
+                        await supabase
                             .from('customer_logs')
                             .insert({
                                 name: cleanJson.name.trim(),
@@ -157,19 +145,22 @@ export async function POST(req: NextRequest) {
                                 items_count: cleanJson.items.length,
                                 total_price: itemsTotal + 40,
                                 status: 'PROCESSED'
-                            })
-                            .select();
-
-                        if (insertedData && insertedData[0]) finalProcessedData.push(insertedData[0]);
+                            });
                     }
                 }
             } catch (jsonError) {
-                console.error(`❌ รูปที่ ${i + 1} ถอดรหัส JSON ล้มเหลว ข้ามไปรูปถัดไป`);
+                console.error(`❌ รูปที่ ${i + 1} JSON ล้มเหลว ข้ามไป`);
             }
         }
 
-        // ประมวลผลรูปภาพครบถ้วนแล้ว ส่งรายงานสรุปทั้งหมดกลับหน้าบ้าน
-        return NextResponse.json({ success: true, dbData: finalProcessedData });
+        // ส่งข้อมูลทั้งหมดจาก DB กลับ (ไม่ใช่แค่ที่เพิ่งประมวลผล)
+        const { data: allRecords } = await supabase
+            .from('customer_logs')
+            .select('*')
+            .order('id', { ascending: true });
+
+        console.log(`✅ เสร็จสิ้น — ข้อมูลทั้งหมด ${allRecords?.length || 0} records`);
+        return NextResponse.json({ success: true, dbData: allRecords || [] });
 
     } catch (error: any) {
         console.error('Server Critical Error:', error);
@@ -177,16 +168,31 @@ export async function POST(req: NextRequest) {
     }
 }
 
+// GET — ดึงข้อมูลจาก DB (ใช้เมื่อ client กลับมาจากการสลับแอป)
+export async function GET() {
+    try {
+        const { data, error } = await supabase
+            .from('customer_logs')
+            .select('*')
+            .order('id', { ascending: true });
+
+        if (error) throw error;
+        return NextResponse.json({ success: true, dbData: data || [] });
+    } catch (error: any) {
+        console.error('GET Error:', error);
+        return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    }
+}
+
 export async function DELETE(req: NextRequest) {
     try {
         const body = await req.json();
-        const { deleteAll } = body; // รับค่าคำสั่งล้างทั้งหมดจากหน้าบ้าน
+        const { deleteAll } = body;
 
         if (deleteAll) {
             const { error } = await supabase.rpc('truncate_customer_logs');
-
             if (error) throw error;
-            console.log("💥 [เซิร์ฟเวอร์] สั่ง TRUNCATE ล้างตารางและรีเซ็ต ID นับ 1 ใหม่เรียบร้อยแล้ว!");
+            console.log("💥 TRUNCATE เรียบร้อย");
         }
 
         return NextResponse.json({ success: true });
